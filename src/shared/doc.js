@@ -2,13 +2,12 @@
 //import '../static/style.css'
 
 import * as data from './data.js'
+import * as db from './db.js'
 //import Worker from "worker-loader!./data.worker.js";
 import hlc from '@tpp/hybrid-logical-clock'
 import uuid from '@tpp/simple-uuid'
 // Initialize Error Reporting
-import * as Sentry from '@sentry/browser'
 import LogRocket from 'logrocket'
-import PouchDB from 'pouchdb'
 import { ImmortalStorage, IndexedDbStore, LocalStorageStore, SessionStorageStore } from 'immortal-db'
 
 const dataWorker = new Worker('/data.worker.js');
@@ -20,7 +19,6 @@ const container = require("Container");
 const platform = require("platform");
 const config = require("../../config.js");
 const mycrypt = require("./encrypt.js");
-const PersistentWebSocket = require("pws");
 
 if(window.location.origin === config.PRODUCTION_SERVER) {
   Sentry.init({ dsn: config.SENTRY_DSN
@@ -36,20 +34,12 @@ if(window.location.origin === config.PRODUCTION_SERVER) {
   });
 }
 
-const Dexie = require("dexie").default;
 let ImmortalDB;
 async function initImmortalDB() {
   const immortalStores = [await new IndexedDbStore(), await new LocalStorageStore(), await new SessionStorageStore()];
   ImmortalDB = new ImmortalStorage(immortalStores);
 }
 initImmortalDB();
-
-const dexie = new Dexie("db");
-dexie.version(4).stores({
-  trees: "id,updatedAt",
-  cards: "updatedAt, treeId, [treeId+deleted]",
-  tree_snapshots: "snapshot, treeId"
-});
 
 const helpers = require("./doc-helpers");
 //import { Elm } from "../elm/Main";
@@ -66,7 +56,6 @@ let tourStepPositionRefElementId = "";
 window.elmMessages = [];
 
 let remoteDB;
-let db;
 let gingko;
 let TREE_ID;
 const CLIENT_ID = uuid(12);
@@ -151,235 +140,6 @@ function getFlags() {
 }
 
 
-async function setUserDbs(eml) {
-  email = eml;
-
-  // HEAD request to /session to check if we're logged in
-  let sessionResponse = await fetch("/session", { method: "HEAD" });
-  if (sessionResponse.status === 401) {
-    Sentry.captureMessage('401: Unauthorized', { extra: { email } });
-    await logout();
-    return;
-  }
-
-  userDbName = `userdb-${helpers.toHex(email)}`;
-  let userDbUrl = window.location.origin + "/db/" + userDbName;
-  var remoteOpts = { skip_setup: true };
-  remoteDB = new PouchDB(userDbUrl, remoteOpts);
-  // Check remoteDB exists and accessible before continuing
-  let remoteDBinfo = await remoteDB.info().catch((e) => {console.error(e)});
-  if (remoteDBinfo.error === "unauthorized") {
-    await logout();
-    return;
-  }
-
-  db = new PouchDB(userDbName);
-  initWebSocket();
-
-  // Sync document list with server
-
-  let firstLoad = true;
-
-  Dexie.liveQuery(() => dexie.trees.toArray()).subscribe((trees) => {
-    const docMetadatas = trees.filter(t => t.deletedAt == null).map(treeDocToMetadata);
-    if (!loadingDocs && !firstLoad) {
-      toElm(docMetadatas, "documentListChanged");
-    }
-
-    const unsyncedTrees = trees.filter(t => !t.synced).map(t => _.omit(t, ['synced', 'collaborators']));
-    if (unsyncedTrees.length > 0) {
-      wsSend('trees', unsyncedTrees, false);
-    }
-    firstLoad = false;
-  });
-
-  thirdPartyScriptsInit(eml)
-}
-
-
-function initWebSocket () {
-  const wsUrl = window.location.origin.replace('http', 'ws')+'/ws'
-  ws = new PersistentWebSocket(wsUrl, {pingTimeout: 30000 + 2000})
-
-  let interval;
-  ws.onopen = () => {
-    // Send each item from wsQueue and clear it
-    wsQueue.forEach(([msgTag, msgData]) => {
-      wsSend(msgTag, msgData, false)
-    })
-    wsQueue = [];
-
-    if (TREE_ID) {
-      wsSend('rt:join', { tr: TREE_ID, uid: CLIENT_ID, m: COLLAB_STATE || null }, false);
-    }
-
-    interval = setInterval(() => ws.send('ping'), 30000)
-    setTimeout(() => toElm(null, 'appMsgs', 'SocketConnected') , 1000)
-  }
-
-  ws.onmessage = async (e) => {
-    if (e.data == 'pong') {
-      return
-    }
-
-    const data = JSON.parse(e.data)
-    try {
-      switch (data.t) {
-        case 'user':
-          console.log('user', JSON.stringify(data.d))
-          let currentSessionData = getSessionData()
-          if (currentSessionData && currentSessionData.email === data.d.id) {
-            // Merge properties
-            let newSessionData = Object.assign({}, currentSessionData, _.omit(data.d, ['id', 'createdAt']))
-            if (!_.isEqual(currentSessionData, newSessionData)) {
-              setSessionData(newSessionData, 'user ws msg')
-              setTimeout(() => gingko.ports.userSettingsChange.send(newSessionData), 0)
-            }
-          }
-          break
-
-        case 'cards':
-          if (data.d.length > 0) {
-            await dexie.cards.bulkPut(data.d.map(c => ({ ...c, synced: true })))
-          }
-          break
-
-        case 'cardsConflict':
-          if (data.d.length > 0) {
-            await dexie.cards.bulkPut(data.d.map(c => ({ ...c, synced: true })))
-
-            // send encrypted unsynced local cards to Sentry
-            const unsyncedCards = await dexie.cards.where('treeId').equals(TREE_ID).and(c => !c.synced).toArray();
-            Sentry.captureMessage('cardsConflict: cards conflict ' + TREE_ID, { extra: { unsyncedCards , error: data.e} })
-          } else {
-            Sentry.captureMessage('cardsConflict: no cards ' + TREE_ID, { extra: { error: data.e} })
-            const numberUnsynced = await dexie.cards.where('treeId').equals(TREE_ID).and(c => !c.synced).count();
-            const msg = `Error syncing ${numberUnsynced} change${numberUnsynced == 1 ? "" : "s"}. Try refreshing the page.\n\nIf this error persists, please contact support!`;
-            toElm(msg, 'appMsgs', 'ErrorAlert');
-          }
-          break
-
-        case 'pushOk':
-          pushErrorCount = 0;
-          hlc.recv(_.max(data.d))
-          toElm(data, 'appMsgs', 'PushOk')
-          break
-
-        case 'pushError':
-          pushErrorCount++;
-          if (pushErrorCount >= 4) {
-            let numberUnsynced = await dexie.cards.where('treeId').equals(TREE_ID).and(c => !c.synced).count();
-            const msg = `Error syncing ${numberUnsynced} change${numberUnsynced == 1 ? "" : "s"}. Try refreshing the page.\n\nIf this error persists, please contact support!`;
-            toElm(msg, 'appMsgs', 'ErrorAlert');
-          }
-          console.log(pushErrorCount)
-          toElm(data, 'appMsgs', 'PushError')
-          break
-
-        case 'doPull':
-          // Server says this tree has changes
-          if (data.d === TREE_ID) {
-            let cards = await dexie.cards.where('treeId').equals(TREE_ID).toArray()
-            pull(TREE_ID, getChk(TREE_ID, cards))
-          }
-          break
-
-        case 'ai:generate-new':
-          toElm(data.d, 'appMsgs', 'AIGenerateNewSuccess');
-          break
-
-        case 'ai:success':
-          if (data.d.t === TREE_ID) {
-            let cards = await dexie.cards.where('treeId').equals(TREE_ID).toArray()
-            pull(TREE_ID, getChk(TREE_ID, cards))
-            toElm(data.d.i, 'appMsgs', 'AISuccess')
-          }
-          break
-
-        case 'trees':
-          await dexie.trees.bulkPut(data.d.map(t => ({ ...t, synced: true })))
-          break
-
-        case 'treesOk':
-          await dexie.trees.where('updatedAt').belowOrEqual(data.d).modify({ synced: true })
-          break
-
-        case 'historyMeta': {
-          const { tr, d } = data
-          const snapshotData = d.map(hmd => ({ snapshot: hmd.id, treeId: tr, data: null }))
-          try {
-            await dexie.tree_snapshots.bulkAdd(snapshotData)
-          } catch (e) {
-            const errorNames = e.failures.map(f => f.name)
-            if (errorNames.every(n => n === 'ConstraintError')) {
-              // Ignore
-            } else {
-              throw e
-            }
-          }
-          break
-        }
-
-        case 'history': {
-          const { tr, d } = data
-          const snapshotData = d.map(hd => ({
-            snapshot: hd.id,
-            treeId: tr,
-            data: hd.d.map(d => ({ ...d, synced: true }))
-          }))
-          await dexie.tree_snapshots.bulkPut(snapshotData)
-          break
-        }
-
-        case 'userSettingOk':
-          console.log('userSettingOk', data.d)
-          const { d } = data
-          let currSessionData = getSessionData()
-          currSessionData[d[0]] = d[1]
-          setSessionData(currSessionData, 'userSettingOk ws msg')
-          break
-
-        case 'rt':
-          if (Array.isArray(data.d.m) && data.d.m[0] == "d") {
-            toElm(data.d.uid, 'docMsgs', 'CollaboratorDisconnected')
-          } else {
-            toElm(data.d, 'docMsgs', 'RecvCollabState');
-          }
-          break;
-
-        case 'rt:users':
-          toElm(data.d, 'docMsgs', 'RecvCollabUsers');
-          break;
-
-        case 'removedFrom':
-          await dexie.trees.delete(data.d);
-          if (data.d === TREE_ID) {
-            location.assign('/');
-          }
-          break;
-      }
-    } catch (e) {
-      console.log(e)
-    }
-  }
-
-  ws.onerror = (e) => {
-    Sentry.captureException(e);
-    if (wsErrorCount == 3 || wsErrorCount == 10 || wsErrorCount >= 20) {
-      let msg = `Error with the current session.\nTry refreshing.\n\nIf it persists, export a JSON backup of recent work, and log out and back in.`
-      toElm(msg, 'appMsgs', 'ErrorAlert');
-    }
-    wsErrorCount++;
-    console.error('ws error', e);
-  }
-
-  ws.onclose = (e) => {
-    // Clear list of collaborators
-    toElm([], 'docMsgs', 'RecvCollabUsers');
-
-    clearInterval(interval)
-  }
-}
 
 
 /* === Third-Party Scripts === */
@@ -502,17 +262,29 @@ const fromElm = (msg, elmData) => {
   let casesWeb = {
     // === SPA ===
 
-    StoreUser: async () => {
-      setSessionData(elmData, "StoreUser");
-      await setUserDbs(elmData.email);
-      const timestamp = Date.now();
-      elmData.seed = timestamp;
-      elmData.currentTime = timestamp;
-      setTimeout(() => gingko.ports.userLoggedInMsg.send(null), 0);
+    StoreUser: async (isNewUser) => {
+      let user;
+      if (isNewUser) {
+        user = db.signup(elmData.email, elmData.password);
+      } else {
+        user = db.login(elmData.email, elmData.password);
+      }
+
+      if (user) {
+        setSessionData(elmData, "StoreUser");
+        email = user.id;
+        const timestamp = Date.now();
+        elmData.seed = timestamp;
+        elmData.currentTime = timestamp;
+        setTimeout(() => gingko.ports.userLoggedInMsg.send(null), 0);
+      } else {
+        toElm(null, "appMsgs", "LoginFailed");
+      }
     },
 
     LogoutUser : async () => {
-      await logout();
+      localStorage.removeItem(sessionStorageKey);
+      setTimeout(() => gingko.ports.userLoggedOutMsg.send(null), 0);
     },
 
     // === Dialogs, Menus, Window State ===
@@ -531,88 +303,24 @@ const fromElm = (msg, elmData) => {
 
     // === Database ===
 
-    InitDocument: async () => {
+    InitDocument: () => {
       TREE_ID = elmData;
-
       const now = Date.now();
-      const treeDoc = {...treeDocDefaults, id: TREE_ID, location: "cardbased", owner: email, createdAt: now, updatedAt: now};
-      const cardDoc = {...cardDefaults, id: my_uuid(24), treeId: TREE_ID, updatedAt: hlc.nxt()};
-
-      await dexie.trees.add(treeDoc);
-      await dexie.cards.add(cardDoc);
-
-      // Set localStore db
-      localStore.db(elmData);
-
-      try {
-        loadCardBasedDocument(TREE_ID);
-      } catch (e) {
-        console.log(e);
-      }
+      const treeDoc = {id: TREE_ID, name: "New Document", location: "local", owner: email, createdAt: now, updatedAt: now};
+      const cardDoc = {id: my_uuid(24), treeId: TREE_ID, content: "", parentId: null, position: 0, updatedAt: hlc.nxt(), deleted: false};
+      db.treeUpsert.run(treeDoc.id, treeDoc.name, treeDoc.location, treeDoc.owner, null, null, treeDoc.createdAt, treeDoc.updatedAt, null);
+      db.cardInsert.run(cardDoc.updatedAt, cardDoc.id, cardDoc.treeId, cardDoc.content, cardDoc.parentId, cardDoc.position, cardDoc.deleted);
+      loadDocument(TREE_ID);
     },
 
-    LoadDocument : async () => {
+    LoadDocument : () => {
       TREE_ID = elmData;
-
-      wsSend('rt:join', { tr: TREE_ID, uid: CLIENT_ID, m: COLLAB_STATE || null}, true);
-      // Load title
-      const treeDoc = await dexie.trees.get(elmData);
-      if (treeDoc) {
-        toElm(treeDocToMetadata(treeDoc), "appMsgs", "MetadataUpdate")
-      } else {
-        toElm(TREE_ID, "appMsgs", "NotFound")
-        return;
-      }
-
-      try {
-        if (treeDoc.location === "couchdb") {
-          loadGitLikeDocument(elmData);
-        } else if (treeDoc.location === "cardbased") {
-          loadCardBasedDocument(elmData);
-        }
-      } catch (e) {
-        console.log(e);
-      }
-    },
-
-    CopyDocument: async () => {
-      // Load title
-      let metadata = await data.loadMetadata(db, elmData);
-
-      // Load local document data.
-      let localExists;
-      let [loadedData, savedIds] = await data.load(db, elmData);
-      savedIds.forEach(item => savedObjectIds.add(item));
-
-      if (loadedData.hasOwnProperty("commit") && loadedData.commit.length > 0) {
-        toElm([metadata.name, loadedData], "copyLoaded");
-      } else {
-        localExists = false;
-        let remoteExists;
-        PULL_LOCK = true;
-        try {
-          let pullResult = await data.pull(db, remoteDB, elmData, "LoadDocument");
-
-          if (pullResult !== null) {
-            pullResult[1].forEach(item => savedObjectIds.add(item));
-            toElm([metadata.name, pullResult[0]], "copyLoaded");
-          } else {
-            remoteExists = false;
-            if (!localExists && !remoteExists) {
-              toElm(elmData, "appMsgs", "NotFound")
-            }
-          }
-        } catch (e){
-          console.error(e)
-        } finally {
-          PULL_LOCK = false;
-        }
-      }
-
+      loadDocument(elmData);
     },
 
     GetDocumentList: () => {
-      loadDocListAndSend("GetDocumentList");
+      const docs = db.treesByOwner.all(email);
+      toElm(docs.map(treeDocToMetadata), "documentListChanged");
     },
 
     RequestDelete: async () => {
@@ -621,25 +329,15 @@ const fromElm = (msg, elmData) => {
       }
     },
 
-    RenameDocument: async () => {
+    RenameDocument: () => {
       if (!renaming) { // Hack to prevent double rename attempt due to Browser.Dom.blur
         renaming = true;
-        await dexie.trees.update(TREE_ID, {name: elmData, updatedAt: Date.now(), synced: false});
+        db.treeUpsert.run(TREE_ID, elmData, "local", email, null, null, null, Date.now(), null);
         renaming = false;
       }
     },
 
-    PushDeltas : () => {
-      if (elmData.dlts.length > 0) {
-        wsSend('push', elmData, false);
-      }
-    },
-
-    SaveCardBased : async () => {
-      if (DATA_TYPE === GIT_LIKE_DATA) {
-        return;
-      }
-
+    SaveCardBased : () => {
       if (elmData && Array.isArray(elmData.errors)) {
         alert("Error saving data!\n\n" + elmData.errors.join("\n----\n"));
         return;
@@ -650,40 +348,14 @@ const fromElm = (msg, elmData) => {
         return;
       }
 
-      let newData = elmData.toAdd.map((c) => { return { ...c, updatedAt: hlc.nxt() }})
-      const toMarkSynced = elmData.toMarkSynced.map((c) => { return { ...c, synced: true }})
-      const timestamp = Date.now();
+      let toAdd = elmData.toAdd.map((c) => { return { ...c, updatedAt: hlc.nxt() }})
+      let toMarkDeleted = elmData.toMarkDeleted.map((c) => { return { ...c, deleted: true }})
 
-      let toMarkDeleted = [];
-      if (elmData.toMarkDeleted.length > 0) {
-        const deleteHash = uuid();
-        toMarkDeleted = elmData.toMarkDeleted.map((c, i) => ({ ...c, updatedAt: `${timestamp}:${i}:${deleteHash}` }));
-      }
-
-      try {
-        await dexie.transaction('rw', dexie.cards, async () => {
-            dexie.cards.bulkPut(newData.concat(toMarkSynced).concat(toMarkDeleted));
-            dexie.cards.bulkDelete(elmData.toRemove);
-            DIRTY = false;
-        });
-
-        if (elmData.toAdd.length > 0 || toMarkDeleted.length > 0) {
-          if (elmData.toAdd.length == 1 && elmData.toAdd[0].content == "") {
-            // Don't add new empty cards to history.
-            return;
-          }
-
-          const cards = await dexie.cards.where({ treeId: TREE_ID, deleted: 0 }).toArray();
-          const lastUpdatedTime = cards.map((c) => c.updatedAt.split(':')[0]).reduce((a, b) => Math.max(a, b));
-          const snapshotId = `${lastUpdatedTime}:${TREE_ID}`;
-          const snapshotData = cards.map((c) => ({ ...c, snapshot: snapshotId, delta: 0}));
-          const snapshot = { snapshot: snapshotId, treeId: TREE_ID, data: snapshotData, local: true, ts: Number(lastUpdatedTime)};
-          await dexie.tree_snapshots.put(snapshot);
-        }
-        await dexie.trees.update(TREE_ID, {updatedAt: timestamp, synced: false});
-      } catch (e) {
-        alert("Error saving data!" + e);
-      }
+      db.db.transaction(() => {
+        toAdd.forEach(c => db.cardInsert.run(c.updatedAt, c.id, c.treeId, c.content, c.parentId, c.position, false));
+        toMarkDeleted.forEach(c => db.cardDelete.run(c.updatedAt, c.id));
+        elmData.toRemove.forEach(id => db.cardDelete.run(hlc.nxt(), id));
+      })();
     },
 
     SaveCardBasedTree: async () => {
@@ -1040,92 +712,18 @@ const treeDocDefaults = {name: null, location: "couchdb", inviteUrl: null, colla
 const cardDefaults = {parentId: null, deleted: 0, content: "", position: 0, synced: false};
 
 function treeDocToMetadata(tree) {
-  return {docId: tree.id, name: tree.name, collaborators: tree.collaborators, createdAt: tree.createdAt, updatedAt: tree.updatedAt, _rev: null}
+  return {docId: tree.id, name: tree.name, collaborators: [], createdAt: tree.createdAt, updatedAt: tree.updatedAt, _rev: null}
 }
 
-async function loadCardBasedDocument (treeId) {
-  DATA_TYPE = CARD_DATA;
-  if (cardDataSubscription != null) { cardDataSubscription.unsubscribe(); }
-  if (historyDataSubscription != null) { historyDataSubscription.unsubscribe(); }
-
-  // Load document-specific settings.
-  localStore.db(treeId);
-  let store = localStore.load();
-
-  // Load local document data.
-  let loadedCards = await dexie.cards.where("treeId").equals(treeId).toArray();
-  const chk = getChk(treeId, loadedCards);
-  if (loadedCards.length > 0) {
-    loadedCards.localStore = store;
-    toElm(loadedCards, "appMsgs", "CardDataReceived");
-  }
-
-  let firstLoad = true;
-
-  // Setup Dexie liveQuery for local document data.
-  cardDataSubscription = Dexie.liveQuery(() => dexie.cards.where("treeId").equals(treeId).toArray()).subscribe((cards) => {
-    //console.log("LiveQuery update", cards);
-    if (cards.length > 0) {
-      // Preserve textarea field and cursor position.
-      let currActive = document.activeElement;
-      let currActiveId = currActive ? currActive.id : null;
-      let currActivePos = currActive ? currActive.selectionStart : null;
-      let currActiveContent = currActive ? currActive.value : null;
-
-      toElm(cards, "appMsgs", "CardDataReceived");
-
-      if (currActiveId && currActiveId.startsWith("card-edit-")) {
-        // Restore textarea field and cursor position.
-        requestAnimationFrame(() => {
-          let newActive = document.getElementById(currActiveId);
-          if (newActive) {
-            newActive.focus();
-            newActive.value = currActiveContent;
-            newActive.selectionStart = currActivePos;
-            newActive.selectionEnd = currActivePos;
-          }
-        });
-      }
-
-
-      saveBackupToImmortalDB(treeId, cards);
-      if (firstLoad) {
-        firstLoad = false;
-        const firstCard = cards.filter(c => c.parentId === null)[0];
-        setTimeout(() => {toElm(firstCard.id, "docMsgs", "InitialActivation")} , 20);
-      }
-    }
-  });
-
-  // Setup Dexie liveQuery for local history data, after initial pull.
-  historyDataSubscription = Dexie.liveQuery(() => dexie.tree_snapshots.where("treeId").equals(treeId).toArray()).subscribe((history) => {
-    if (history.length > 0) {
-      const historyWithTs = history.map(h => ({
-        ...h,
-        ts: Number(h.snapshot.split(':')[0]),
-        data: h.data !== null ? h.data.map(d => ({ ...d, deleted: 0 })) : h.data
-      }));
-      toElm(historyWithTs, "appMsgs", "HistoryDataReceived");
-    }
-  });
-
-  // Pull data from remote
-  pull(treeId, chk);
-}
-
-function getChk(treeId, cards) {
-  if (cards.length > 0) {
-    return cards.filter(c => c.synced).map(c => c.updatedAt).sort().reverse()[0];
+function loadDocument (treeId) {
+  const tree = db.treeById.get(treeId);
+  if (tree) {
+    toElm(treeDocToMetadata(tree), "appMsgs", "MetadataUpdate");
+    const cards = db.cardsAllUndeleted.all(treeId);
+    toElm(cards, "appMsgs", "CardDataReceived");
   } else {
-    return '0';
+    toElm(treeId, "appMsgs", "NotFound");
   }
-}
-
-function pull(treeId, chk) {
-  wsSend("pull", [treeId, chk], true);
-  setTimeout(() => {
-    wsSend('pullHistoryMeta', treeId, true);
-  }, 500)
 }
 
 function saveBackupToImmortalDB (treeId, cards) {
