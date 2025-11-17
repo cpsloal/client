@@ -112,7 +112,6 @@ const webConfig = {
   // Where to output bundled code.
   output: {
     path: path.join(__dirname, "web"),
-    publicPath: "/",
     filename: "[name].js"
   },
 
@@ -162,11 +161,16 @@ const webConfig = {
   // Source maps in production for Sentry
   devtool: !isDev ? "source-map" : false,
 
-  /*
   externals: {
-    "pouchdb": "require('pouchdb')",
+    "better-sqlite3": "require('better-sqlite3')",
   },
-  */
+
+  devServer: {
+    static: {
+      directory: path.join(__dirname, 'web'),
+    },
+    port: 8080
+  },
 
   plugins: [
 
@@ -174,22 +178,9 @@ const webConfig = {
     new HtmlWebpackPlugin({
       freshdeskAppId: config.FRESHDESK_APPID,
       template: "./index.ejs",
-      filename: "../web/index.html",
+      filename: "index.html",
       chunks: ["doc"]
     }),
-
-    // Plugin to copy static assets (css, images).
-    new CopyWebpackPlugin({ patterns: [{
-      from: "./static",
-      to: "../web",
-      filter: async (resourcePath) => {
-        if (resourcePath.endsWith('index.html')) {
-          return false;
-        } else {
-          return true;
-        }
-      }
-    }]})
   ]
 };
 
@@ -227,7 +218,7 @@ const electronMainConfig = merge(baseElectronConfig, {
   target: "electron-main",
 
   externals: {
-    leveldown: "require('leveldown')"
+    "better-sqlite3": "require('better-sqlite3')"
   },
 
   // Entry points into the code. The roots of the dependency tree.
