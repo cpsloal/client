@@ -1,6 +1,5 @@
 import _ from "lodash";
 import { sha1 } from "hash-wasm";
-import PouchDB from "pouchdb";
 
 Object.defineProperty(Array.prototype, "tap", { value(f) { f(this); return this; }});
 

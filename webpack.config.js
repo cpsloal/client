@@ -28,10 +28,6 @@ const pl = require("./i18n/pl.json");
 const uk = require("./i18n/uk.json");
 const nb = require("./i18n/nb.json");
 
-const config = require("./config");
-
-
-
 /* ======= WEB TARGET ======= */
 
 const prepTranslation = (langCode, langData) => {
@@ -91,10 +87,10 @@ const nbT = prepTranslation("nb", nb);
 
 const allLanguageStrings = [].concat(zhHansT, zhHantT, esT, arT, frT, ruT, deT, jaT,mrT, pesT, itT, roT, hrT, nlT, huT, svT, caT, brT, csT, faT, idT, koT, plT, ukT, nbT)
 const otherReplacements = [
-  { search: '{%SUPPORT_EMAIL%}', replace: config.SUPPORT_EMAIL, flags: 'g' },
-  { search: '{%SUPPORT_URGENT_EMAIL%}', replace: config.SUPPORT_URGENT_EMAIL, flags: 'g' },
-  { search: '{%HOMEPAGE_URL%}', replace: config.HOMEPAGE_URL, flags: 'g' },
-  { search: '{%TESTIMONIAL_URL%}', replace: config.TESTIMONIAL_URL, flags: 'g' }
+  { search: '{%SUPPORT_EMAIL%}', replace: "support@example.com", flags: 'g' },
+  { search: '{%SUPPORT_URGENT_EMAIL%}', replace: "urgent@example.com", flags: 'g' },
+  { search: '{%HOMEPAGE_URL%}', replace: "https://example.com", flags: 'g' },
+  { search: '{%TESTIMONIAL_URL%}', replace: "https://example.com/testimonials", flags: 'g' }
 ]
 
 const isDev = false;
@@ -112,7 +108,6 @@ const webConfig = {
   // Where to output bundled code.
   output: {
     path: path.join(__dirname, "web"),
-    publicPath: "/",
     filename: "[name].js"
   },
 
@@ -162,34 +157,26 @@ const webConfig = {
   // Source maps in production for Sentry
   devtool: !isDev ? "source-map" : false,
 
-  /*
   externals: {
-    "pouchdb": "require('pouchdb')",
+    "better-sqlite3": "require('better-sqlite3')",
   },
-  */
+
+  devServer: {
+    static: {
+      directory: path.join(__dirname, 'web'),
+    },
+    port: 8080
+  },
 
   plugins: [
 
     // Plugin to insert only needed chunks of JS into HTML output files.
     new HtmlWebpackPlugin({
-      freshdeskAppId: config.FRESHDESK_APPID,
+      freshdeskAppId: "123456789",
       template: "./index.ejs",
-      filename: "../web/index.html",
+      filename: "index.html",
       chunks: ["doc"]
     }),
-
-    // Plugin to copy static assets (css, images).
-    new CopyWebpackPlugin({ patterns: [{
-      from: "./static",
-      to: "../web",
-      filter: async (resourcePath) => {
-        if (resourcePath.endsWith('index.html')) {
-          return false;
-        } else {
-          return true;
-        }
-      }
-    }]})
   ]
 };
 
@@ -227,7 +214,7 @@ const electronMainConfig = merge(baseElectronConfig, {
   target: "electron-main",
 
   externals: {
-    leveldown: "require('leveldown')"
+    "better-sqlite3": "require('better-sqlite3')"
   },
 
   // Entry points into the code. The roots of the dependency tree.

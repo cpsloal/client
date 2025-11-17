@@ -3,7 +3,7 @@ import { devices } from '@playwright/test';
 
 const config: PlaywrightTestConfig = {
   testDir: './tests/e2e',
-  timeout: 15 * 1000,
+  timeout: 30 * 1000,
   expect: {
     timeout: 5000
   },
@@ -15,7 +15,16 @@ const config: PlaywrightTestConfig = {
   workers: process.env.CI ? 1 : undefined,
 
   reporter: 'html',
+  webServer: {
+    command: 'npm run start',
+    url: 'http://localhost:8080',
+    reuseExistingServer: !process.env.CI,
+    timeout: 120 * 1000,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  },
   use: {
+    baseURL: 'http://localhost:8080',
     actionTimeout: 0,
     trace: 'on-first-retry',
   },

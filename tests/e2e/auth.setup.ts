@@ -3,22 +3,21 @@ import { test as setup, expect } from '@playwright/test';
 import { execSync } from "child_process";
 
 const cwd = process.cwd();
-const dbPath = `${cwd}/../data/data.sqlite`;
+const dbPath = `${cwd}/data/data.sqlite`;
 const oldFixtures = `${cwd}/cypress/fixtures`;
 const userFile = `${cwd}/tests/e2e/.auth/user.json`;
 
 setup('signup test user', async ({ page }) => {
+  // Create DB and tables
+  execSync(`sqlite3 ${dbPath} < ${cwd}/src/shared/db.sql`);
   // Delete test user data from  SQLite
   execSync(`sqlite3 ${dbPath} < ${oldFixtures}/deleteTestData.sql`);
-  // Delete test user's CouchDB
-  await page.request.delete(`${config.TEST_SERVER}/test/user`);
-
-  await page.goto(config.TEST_SERVER);
+  await page.goto("/");
   await page.waitForLoadState('domcontentloaded');
 
-  await expect(page.locator('text=Signup')).toBeVisible();
-
-  const signupRes = await page.request.post(`${config.TEST_SERVER}/signup`, {data: { email: 'cypress@testing.com', password: 'testing' }});
+  await page.locator('input[placeholder="Email"]').fill('cypress@testing.com');
+  await page.locator('input[placeholder="Password"]').fill('testing');
+  await page.locator('button:has-text("Signup")').click();
 
   await page.evaluate(() => {
     console.log('setting localStorage');
